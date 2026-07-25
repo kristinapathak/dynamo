@@ -10,6 +10,13 @@ The **GPU Memory Service (GMS)** is an out-of-process GPU memory manager that de
 
 GMS provides PyTorch integration via `CUDAPluggableAllocator` and pre-built integrations for inference frameworks like **vLLM** and **SGLang**.
 
+V0 layers its metadata, layout reconstruction, scratch/mutable KV, framework
+accounting, and compatibility behavior over `gpu_memory_service.core`. The
+shared core owns rank-local physical allocations, socket sessions and leases,
+neutral VMM mapping operations, Torch allocator construction, and
+alias-preserving tensor isolation. Snapshot V1 uses the same core through its
+separate deterministic lifecycle profile.
+
 ## Problem Statement
 
 In traditional LLM inference deployments, each worker process:
@@ -65,7 +72,7 @@ The GMS server runs as an independent process that manages GPU memory without ev
 
 The server consists of three main components:
 
-1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`). It treats shareable file descriptors as ephemeral client connection handles: each export RPC calls `cuMemExportToShareableHandle` lazily and transfers the resulting FD to that client instead of retaining a server-owned FD. Critically, it never calls `cuMemMap` - clients handle all virtual address mapping. Allocation requests retry on OOM until they succeed or the optional retry timeout is reached.
+1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`) and retains the generic allocation handle. Each export RPC creates a transient shareable file descriptor (`cuMemExportToShareableHandle`) and closes the server copy after `SCM_RIGHTS` transfer. Critically, it never calls `cuMemMap` - clients handle all virtual address mapping. Allocation requests retry on OOM until they succeed or the optional retry timeout is reached.
 
 2. **State Machine (FSM)** - Manages global lock state, waiter coordination, and disconnect cleanup.
 
@@ -113,7 +120,7 @@ sequenceDiagram
     Note over C,GPU: Both Writer and Reader: Export and map
     C->>S: ExportAllocationRequest(allocation_id)
     S->>GPU: cuMemExportToShareableHandle(handle)
-    GPU-->>S: fresh fd
+    GPU-->>S: transient fd
     S-->>C: Response + fd (via SCM_RIGHTS)
 
     C->>GPU: cuMemImportFromShareableHandle(fd)

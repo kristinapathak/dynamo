@@ -13,9 +13,14 @@ from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm_device_type
+from gpu_memory_service.core.client.torch.extensions import _allocator_ext
+
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore
 
 if TYPE_CHECKING:
-    import torch
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
     from torch.cuda.memory import MemPool
 
@@ -86,14 +91,18 @@ def _ensure_callbacks_initialized() -> None:
             f"GMS torch mempool integration is CUDA-only; device_type={get_vmm_device_type().value} "
         )
 
-    from gpu_memory_service.client.torch.extensions import _allocator_ext as cumem
-    from torch.cuda import CUDAPluggableAllocator
-
     if _callbacks_initialized:
         return
 
-    _pluggable_alloc = CUDAPluggableAllocator(cumem.__file__, "my_malloc", "my_free")
-    cumem.init_module(_gms_malloc, _gms_free)
+    if _allocator_ext is None:
+        raise RuntimeError("GPU Memory Service allocator extension is not built")
+    if torch is None:
+        raise RuntimeError("torch is required for GMS allocator integration")
+
+    _allocator_ext.init_module(_gms_malloc, _gms_free)
+    _pluggable_alloc = torch.cuda.CUDAPluggableAllocator(
+        _allocator_ext.__file__, "my_malloc", "my_free"
+    )
     _callbacks_initialized = True
 
 
@@ -103,10 +112,10 @@ def _create_mem_pool() -> "MemPool":
             f"GMS torch mempool integration is CUDA-only; device_type={get_vmm_device_type().value} "
         )
 
-    from torch.cuda.memory import MemPool
-
     assert _pluggable_alloc is not None
-    return MemPool(allocator=_pluggable_alloc.allocator())
+    assert torch is not None
+
+    return torch.cuda.MemPool(allocator=_pluggable_alloc.allocator())
 
 
 def get_or_create_gms_client_memory_manager(
