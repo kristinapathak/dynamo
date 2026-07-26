@@ -9,6 +9,7 @@ import asyncio
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
+from time import monotonic
 from typing import Optional
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
@@ -33,6 +34,8 @@ from gpu_memory_service.core.server.sessions import (
 from gpu_memory_service.core.server.sessions import ServerSession
 
 from .fsm import Connection, EpochClearReason, ServerState, StateEvent
+
+_CANCELLATION_POLL_SECONDS = 0.01
 
 
 class OperationNotAllowed(Exception):
@@ -90,6 +93,7 @@ class GMSSessionManager:
         self._core = CoreSessionManager(self._clear_core_epoch)
         self._pending: dict[str, ServerSession] = {}
         self._connections: dict[ServerSession, Connection] = {}
+        self._state_waiters: set[asyncio.Future[None]] = set()
         self._waiting_writers = 0
         self._next_session_id = 0
 
@@ -138,6 +142,21 @@ class GMSSessionManager:
         self._committed = False
         self._clear_v0_epoch(self._clear_reason, replacing_committed)
 
+    def _wake_waiters(self) -> None:
+        for waiter in tuple(self._state_waiters):
+            if not waiter.done():
+                waiter.set_result(None)
+
+    async def _wait_for_state_change(self, timeout: float | None) -> None:
+        waiter = asyncio.get_running_loop().create_future()
+        self._state_waiters.add(waiter)
+        try:
+            await asyncio.wait_for(waiter, timeout)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            self._state_waiters.discard(waiter)
+
     async def acquire_lock(
         self,
         mode: RequestedLockType,
@@ -154,37 +173,40 @@ class GMSSessionManager:
             raise RuntimeError("V0 GMS sessions must use one event loop")
 
         timeout = timeout_ms / 1000 if timeout_ms is not None else None
+        deadline = monotonic() + timeout if timeout is not None else None
         is_writer = mode == RequestedLockType.RW
         if is_writer:
             self._waiting_writers += 1
-        cancelled = threading.Event()
-        self._clear_reason = EpochClearReason.START
-        acquire = asyncio.create_task(
-            asyncio.to_thread(
-                self._core.acquire,
-                mode,
-                timeout,
-                lambda: (
-                    cancelled.is_set() or (is_cancelled is not None and is_cancelled())
-                ),
-            )
-        )
         try:
-            session = await asyncio.shield(acquire)
-        except asyncio.CancelledError:
-            cancelled.set()
-            session = await acquire
-            if session is not None:
-                self._clear_reason = EpochClearReason.ABORT
-                self._core.close(session)
-            raise
+            # Keep lock waits on the event loop; the default executor also carries FDs.
+            while True:
+                if is_cancelled is not None and is_cancelled():
+                    return None
+
+                session = None
+                if is_writer or self._waiting_writers == 0:
+                    self._clear_reason = EpochClearReason.START
+                    session = self._core.acquire(mode, 0, is_cancelled)
+                if session is not None:
+                    self._pending[session_id] = session
+                    return session.mode
+
+                remaining = None if deadline is None else deadline - monotonic()
+                if remaining is not None and remaining <= 0:
+                    return None
+
+                wait_timeout = remaining
+                if is_cancelled is not None:
+                    wait_timeout = (
+                        _CANCELLATION_POLL_SECONDS
+                        if wait_timeout is None
+                        else min(wait_timeout, _CANCELLATION_POLL_SECONDS)
+                    )
+                await self._wait_for_state_change(wait_timeout)
         finally:
             if is_writer:
                 self._waiting_writers -= 1
-        if session is None:
-            return None
-        self._pending[session_id] = session
-        return session.mode
+                self._wake_waiters()
 
     async def cancel_connect(
         self,
@@ -195,6 +217,7 @@ class GMSSessionManager:
         if session is not None:
             self._clear_reason = EpochClearReason.ABORT
             self._core.close(session)
+            self._wake_waiters()
 
     def on_connect(self, conn: Connection) -> None:
         session = self._pending[conn.session_id]
@@ -212,6 +235,7 @@ class GMSSessionManager:
         self._core.commit(conn.core_session)
         self._committed = True
         conn.mode = conn.core_session.mode
+        self._wake_waiters()
 
     def check_operation(self, msg_type: type, conn: Connection) -> None:
         if conn.mode == GrantedLockType.RW and msg_type not in RW_ALLOWED:
@@ -239,6 +263,7 @@ class GMSSessionManager:
         self._clear_reason = EpochClearReason.ABORT
         self._core.close(conn.core_session)
         conn.core_session = None
+        self._wake_waiters()
         return event
 
     async def finish_cleanup(self, conn: Optional[Connection]) -> None:
