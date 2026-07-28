@@ -187,6 +187,8 @@ pub struct WorkerConfig {
     /// roles -- setting it on `Decode` or `Encode` is rejected at
     /// `Worker::run` validation time with `BackendError::InvalidArgument`.
     pub route_to_encoder: bool,
+    /// Metadata published through the optional RL worker-discovery endpoint.
+    pub rl_metadata: Option<crate::RlWorkerMetadata>,
     /// Optional frontend media decoding and fetch policy advertised on the
     /// model deployment card.
     pub media_decoder: Option<MediaDecoder>,
@@ -229,6 +231,7 @@ impl Default for WorkerConfig {
             structural_tag_schema: StructuralTagSchemaMode::Auto,
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,
+            rl_metadata: None,
             media_decoder: None,
             media_fetcher: None,
         }
@@ -979,7 +982,33 @@ impl Worker {
         let serve_fut = builder.start();
         tokio::pin!(serve_fut);
 
-        tokio::select! {
+        let rl_endpoint = if crate::rl::enabled() {
+            let metadata = self.config.rl_metadata.clone().ok_or_else(|| {
+                err(
+                    ErrorType::Backend(BackendError::InvalidArgument),
+                    "DYN_ENABLE_RL requires worker RL metadata",
+                )
+            })?;
+            let setup = crate::rl::serve_endpoint(&endpoint, metadata)
+                .await
+                .map_err(|error| {
+                    err(
+                        ErrorType::Backend(BackendError::Unknown),
+                        format!("RL endpoint setup: {error}"),
+                    )
+                });
+            match setup {
+                Ok(endpoint) => Some(endpoint),
+                Err(error) => {
+                    self.orchestrator_steps(&endpoint).await;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+
+        let serve_result = tokio::select! {
             biased;
             result = &mut serve_fut => {
                 match result {
@@ -990,22 +1019,32 @@ impl Worker {
                         tracing::info!(
                             "Endpoint completed gracefully; running shutdown orchestration"
                         );
+                        Ok(())
                     }
                     // Serve errored; cleanup_once in run() is the safety net.
                     Err(e) => {
-                        return Err(err(
+                        Err(err(
                             ErrorType::Backend(BackendError::Unknown),
                             format!("serve: {e}"),
-                        ));
+                        ))
                     }
                 }
             }
             _ = shutdown.cancelled() => {
                 tracing::info!("Received shutdown signal; running graceful orchestration");
+                Ok(())
             }
-        }
+        };
 
         self.orchestrator_steps(&endpoint).await;
+
+        if let Some(rl_endpoint) = rl_endpoint
+            && let Err(error) = rl_endpoint.shutdown().await
+        {
+            tracing::warn!(%error, "RL discovery endpoint shutdown failed");
+        }
+
+        serve_result?;
         Ok(())
     }
 
@@ -1714,6 +1753,11 @@ async fn build_local_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rl_metadata_is_opt_in() {
+        assert!(WorkerConfig::default().rl_metadata.is_none());
+    }
 
     fn error_type_of(result: Result<ModelType, DynamoError>) -> ErrorType {
         result.unwrap_err().error_type()

@@ -291,6 +291,7 @@ impl PreparedRequest {
                 stop_reason: None,
                 kv_transfer_params: (self.mode == ServerMode::Prefill).then(|| self.handoff()),
             }),
+            routed_experts: None,
         }
     }
 
