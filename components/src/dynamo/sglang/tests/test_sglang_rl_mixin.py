@@ -4,9 +4,11 @@
 """Unit tests for RLMixin generic tokenizer_manager passthrough."""
 
 import dataclasses
+import json
 import sys
 import types
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -144,9 +146,9 @@ class TestNormalizeResult:
             "num_paused_requests": 5,
         }
 
-    def test_dict_passthrough(self):
+    def test_dict_normalized(self):
         d = {"foo": "bar", "count": 3}
-        assert self.handler._normalize_result(d) is d
+        assert self.handler._normalize_result(d) == d
 
     def test_dataclass(self):
         @dataclasses.dataclass
@@ -189,14 +191,26 @@ class TestNormalizeResult:
             "result": [{"val": 1}, "plain", 42]
         }
 
+    def test_cyclic_dataclass_and_container_use_placeholder(self):
+        @dataclasses.dataclass
+        class RecursiveConfig:
+            nested: Any = None
+
+        config = RecursiveConfig()
+        config.nested = {"config": config}
+
+        result = self.handler._normalize_result(config)
+
+        assert result == {"nested": {"config": "<recursive reference>"}}
+        json.dumps(result)
+
     def test_other_value(self):
         assert self.handler._normalize_result(42) == {"result": 42}
         assert self.handler._normalize_result("text") == {"result": "text"}
 
-    def test_non_serializable_falls_back_to_str(self):
+    def test_nested_non_serializable_falls_back_to_str(self):
         obj = object()
-        result = self.handler._normalize_result(obj)
-        assert result == {"result": str(obj)}
+        assert self.handler._normalize_result({"value": obj}) == {"value": str(obj)}
 
 
 # ---------------------------------------------------------------------------
