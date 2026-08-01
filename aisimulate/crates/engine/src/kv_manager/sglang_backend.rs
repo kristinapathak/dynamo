@@ -5,13 +5,12 @@
 //! operations and KV event publishing.
 
 use crate::cache::radix_cache::{KvPageId, NodeId, RadixCache};
+use crate::common::hashing::{
+    LocalBlockHash, SequenceHash, compute_block_hash_for_seq, compute_next_seq_hash,
+};
 use crate::common::kv_cache_trace;
 use crate::common::protocols::KvEventPublishers;
-use dynamo_kv_router::protocols::{
-    BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
-    KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, compute_block_hash_for_seq,
-    compute_next_seq_hash,
-};
+use crate::native::{NativeKvBlock, NativeKvEvent, NativeKvEventData, NativeStoredBlocks};
 use rustc_hash::FxHashMap;
 
 /// Move-only ownership of a request's SGLang KV state.
@@ -70,8 +69,7 @@ impl RadixRequestLease {
         let first_new_token = self.page_hashes.len() * page_size;
         self.page_hashes.extend(compute_block_hash_for_seq(
             &token_ids[first_new_token..complete_pages * page_size],
-            page_size as u32,
-            BlockHashOptions::default(),
+            page_size,
         ));
     }
 
@@ -120,11 +118,11 @@ pub struct SglangKvManager {
     next_event_id: u64,
     /// Maps each physical page to the block hash assigned during Stored
     /// events, so Removed events can use the same block hash.
-    page_to_block_hash: FxHashMap<KvPageId, ExternalSequenceBlockHash>,
+    page_to_block_hash: FxHashMap<KvPageId, SequenceHash>,
     /// Tracks how many live pool slots currently advertise the same logical
     /// block hash so router events reflect logical block visibility, not
     /// transient slot ownership.
-    block_hash_refcounts: FxHashMap<ExternalSequenceBlockHash, usize>,
+    block_hash_refcounts: FxHashMap<SequenceHash, usize>,
 }
 
 pub struct DecodeTokenReservation {
@@ -193,6 +191,7 @@ impl SglangKvManager {
         &self.cache
     }
 
+    #[cfg(test)]
     pub fn cache_mut(&mut self) -> &mut RadixCache {
         &mut self.cache
     }
@@ -236,7 +235,7 @@ impl SglangKvManager {
         pages.append(&mut new_pages);
         let allocated_tokens = available_before - self.cache.available_tokens();
 
-        // Router-visible KV events are complete-block only.
+        // Observer-visible KV events are complete-block only.
         self.publish_stored_hashes(materialized_hashes, &pages, token_ids.len(), prefix_len);
 
         self.log_trace("allocation", allocated_tokens);
@@ -837,10 +836,8 @@ impl SglangKvManager {
                 self.page_to_block_hash.get(&pages[page_idx - 1]).copied()
             };
             let block_hash = match parent_hash {
-                Some(parent_hash) => {
-                    ExternalSequenceBlockHash(compute_next_seq_hash(parent_hash.0, tokens_hash))
-                }
-                None => ExternalSequenceBlockHash(tokens_hash.0),
+                Some(parent_hash) => compute_next_seq_hash(parent_hash, tokens_hash),
+                None => tokens_hash.0,
             };
 
             self.page_to_block_hash.insert(page, block_hash);
@@ -848,10 +845,10 @@ impl SglangKvManager {
             *refcount += 1;
             computed_blocks.push((
                 parent_hash,
-                KvCacheStoredBlockData {
+                NativeKvBlock {
                     block_hash,
-                    tokens_hash,
-                    mm_extra_info: None,
+                    tokens_hash: tokens_hash.0,
+                    token_ids: None,
                 },
                 *refcount,
             ));
@@ -873,9 +870,9 @@ impl SglangKvManager {
             .map(|(_, block, _)| block)
             .collect();
 
-        let event = KvCacheEvent {
+        let event = NativeKvEvent {
             event_id: self.next_event_id,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
+            data: NativeKvEventData::Stored(NativeStoredBlocks {
                 parent_hash,
                 start_position: None,
                 blocks,
@@ -916,9 +913,9 @@ impl SglangKvManager {
             return;
         }
 
-        let event = KvCacheEvent {
+        let event = NativeKvEvent {
             event_id: self.next_event_id,
-            data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+            data: NativeKvEventData::Removed { block_hashes },
             dp_rank: self.dp_rank,
         };
         self.next_event_id += 1;
@@ -935,13 +932,9 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
+    use crate::common::hashing::{compute_block_hash_for_seq, compute_seq_hash_for_block};
     use crate::common::protocols::KvCacheEventSink;
-    use crate::scheduler::capture_router_event_sink;
-    use crate::scheduler::test_utils::{RouterIndexerHarness, stored_hashes};
-    use dynamo_kv_router::RadixTree;
-    use dynamo_kv_router::protocols::{RouterEvent, WorkerId, compute_seq_hash_for_block};
-
-    const ROUTER_TEST_WORKER_ID: WorkerId = 31;
+    use crate::native::{NativeKvEvent, NativeKvEventData};
 
     fn lease_with_hashes(tokens: &[u32], page_size: usize) -> RadixRequestLease {
         let mut lease = RadixRequestLease::default();
@@ -950,7 +943,7 @@ mod tests {
     }
 
     struct MockSink {
-        events: Mutex<Vec<KvCacheEvent>>,
+        events: Mutex<Vec<NativeKvEvent>>,
     }
 
     impl MockSink {
@@ -964,40 +957,16 @@ mod tests {
             self.events.lock().unwrap().len()
         }
 
-        fn clone_events(&self) -> Vec<KvCacheEvent> {
+        fn clone_events(&self) -> Vec<NativeKvEvent> {
             self.events.lock().unwrap().clone()
         }
     }
 
     impl KvCacheEventSink for MockSink {
-        fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
+        fn publish(&self, event: NativeKvEvent) -> anyhow::Result<()> {
             self.events.lock().unwrap().push(event);
             Ok(())
         }
-    }
-
-    fn stored_event_count(events: &[RouterEvent]) -> usize {
-        events
-            .iter()
-            .filter(|event| matches!(event.event.data, KvCacheEventData::Stored(_)))
-            .count()
-    }
-
-    fn removed_event_count(events: &[RouterEvent]) -> usize {
-        events
-            .iter()
-            .filter(|event| matches!(event.event.data, KvCacheEventData::Removed(_)))
-            .count()
-    }
-
-    fn removed_block_count(events: &[RouterEvent]) -> usize {
-        events
-            .iter()
-            .filter_map(|event| match &event.event.data {
-                KvCacheEventData::Removed(remove) => Some(remove.block_hashes.len()),
-                _ => None,
-            })
-            .sum()
     }
 
     #[test]
@@ -1185,9 +1154,7 @@ mod tests {
 
     #[test]
     fn retained_tail_split_releases_leases_before_eviction() {
-        let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
-        let mut mgr = SglangKvManager::new(16, 4, KvEventPublishers::new(Some(sink), None), 0);
-        let mut indexer = RadixTree::new();
+        let mut mgr = SglangKvManager::new(16, 4, KvEventPublishers::default(), 0);
 
         let first_tokens = [1, 2, 3, 4, 5, 6, 7, 8];
         let mut first = mgr.allocate_for_request(&first_tokens[..4]).unwrap();
@@ -1198,10 +1165,6 @@ mod tests {
 
         assert_eq!(first.lease.last_node(), retained_tail);
         assert_eq!(mgr.cache().num_nodes(), 2);
-        for event in buffer.drain() {
-            indexer.apply_event(event).unwrap();
-        }
-
         let second_tokens = [1, 2, 3, 4, 9, 10, 11, 12];
         let mut second = mgr.allocate_for_request(&second_tokens).unwrap();
         assert_eq!(second.prefix_len, 4);
@@ -1209,19 +1172,12 @@ mod tests {
         assert_eq!(mgr.cache().num_nodes(), 3);
         mgr.extend_cached_prefix(&second_tokens, &mut second.lease);
         assert_eq!(mgr.cache().num_nodes(), 4);
-        for event in buffer.drain() {
-            indexer.apply_event(event).unwrap();
-        }
-
         mgr.finish(&first_tokens, first.lease);
         assert!(mgr.retract(second.lease));
         assert_eq!(mgr.cache().protected_size, 0);
         assert_eq!(mgr.cache().evictable_size, 12);
 
         mgr.evict(12);
-        for event in buffer.drain() {
-            indexer.apply_event(event).unwrap();
-        }
         assert_eq!(mgr.cache().page_pool.available(), 16);
         assert_eq!(mgr.cache().protected_size, 0);
         assert_eq!(mgr.cache().evictable_size, 0);
@@ -1304,8 +1260,7 @@ mod tests {
     #[test]
     fn test_event_publishing() {
         let sink = Arc::new(MockSink::new());
-        let mut mgr =
-            SglangKvManager::new(100, 1, KvEventPublishers::new(Some(sink.clone()), None), 0);
+        let mut mgr = SglangKvManager::new(100, 1, KvEventPublishers::new(Some(sink.clone())), 0);
 
         let r = mgr.allocate_for_request(&[1, 2, 3]).unwrap();
         assert_eq!(sink.event_count(), 1); // BlockStored for 3 new pages
@@ -1319,36 +1274,30 @@ mod tests {
     }
 
     #[test]
-    fn test_event_publishing_uses_router_block_hashes() {
+    fn test_event_publishing_uses_native_block_hashes() {
         let sink = Arc::new(MockSink::new());
-        let mut mgr =
-            SglangKvManager::new(100, 4, KvEventPublishers::new(Some(sink.clone()), None), 0);
+        let mut mgr = SglangKvManager::new(100, 4, KvEventPublishers::new(Some(sink.clone())), 0);
 
         let r = mgr.allocate_for_request(&[1, 2, 3, 4, 5, 6]).unwrap();
         mgr.finish(&[1, 2, 3, 4, 5, 6], r.lease);
 
         let events = sink.clone_events();
         assert_eq!(events.len(), 1);
-        let KvCacheEventData::Stored(store) = &events[0].data else {
+        let NativeKvEventData::Stored(store) = &events[0].data else {
             panic!("expected stored event");
         };
         assert_eq!(store.blocks.len(), 1);
 
-        let expected_local =
-            compute_block_hash_for_seq(&[1, 2, 3, 4], 4, BlockHashOptions::default());
+        let expected_local = compute_block_hash_for_seq(&[1, 2, 3, 4], 4);
         let expected_sequence = compute_seq_hash_for_block(&expected_local);
-        assert_eq!(store.blocks[0].tokens_hash, expected_local[0]);
-        assert_eq!(
-            store.blocks[0].block_hash,
-            ExternalSequenceBlockHash(expected_sequence[0])
-        );
+        assert_eq!(store.blocks[0].tokens_hash, expected_local[0].0);
+        assert_eq!(store.blocks[0].block_hash, expected_sequence[0]);
     }
 
     #[test]
     fn test_published_prefix_hashes_only_unseen_suffix() {
         let sink = Arc::new(MockSink::new());
-        let mut mgr =
-            SglangKvManager::new(16, 4, KvEventPublishers::new(Some(sink.clone()), None), 0);
+        let mut mgr = SglangKvManager::new(16, 4, KvEventPublishers::new(Some(sink.clone())), 0);
         let tokens = [1, 2, 3, 4, 5, 6, 7, 8];
         let pages = mgr.cache_mut().page_pool.allocate_pages(2).unwrap();
         let lease = lease_with_hashes(&tokens, 4);
@@ -1368,10 +1317,10 @@ mod tests {
 
         let events = sink.clone_events();
         assert_eq!(events.len(), 2);
-        let KvCacheEventData::Stored(first) = &events[0].data else {
+        let NativeKvEventData::Stored(first) = &events[0].data else {
             panic!("expected first stored event");
         };
-        let KvCacheEventData::Stored(second) = &events[1].data else {
+        let NativeKvEventData::Stored(second) = &events[1].data else {
             panic!("expected suffix stored event");
         };
         assert_eq!(first.blocks.len(), 1);
@@ -1387,13 +1336,13 @@ mod tests {
 
         let mut alloc = mgr.allocate_for_request(&tokens[..2]).unwrap();
         mgr.extend_cached_prefix(&tokens[..2], &mut alloc.lease);
-        mgr.kv_event_publishers = KvEventPublishers::new(Some(sink.clone()), None);
+        mgr.kv_event_publishers = KvEventPublishers::new(Some(sink.clone()));
 
         assert!(mgr.extend_allocation(&tokens[..4], &mut alloc.lease));
         mgr.extend_cached_prefix(&tokens[..4], &mut alloc.lease);
         let events = sink.clone_events();
         assert_eq!(events.len(), 1);
-        let KvCacheEventData::Stored(first_store) = &events[0].data else {
+        let NativeKvEventData::Stored(first_store) = &events[0].data else {
             panic!("expected first cache event to be Stored");
         };
         assert_eq!(
@@ -1406,7 +1355,7 @@ mod tests {
         mgr.finish(&tokens, alloc.lease);
         let events = sink.clone_events();
         assert_eq!(events.len(), 2);
-        let KvCacheEventData::Stored(final_store) = &events[1].data else {
+        let NativeKvEventData::Stored(final_store) = &events[1].data else {
             panic!("expected final cache event to be Stored");
         };
         assert_eq!(
@@ -1419,15 +1368,14 @@ mod tests {
     #[test]
     fn test_duplicate_logical_blocks_publish_once_and_remove_once() {
         let sink = Arc::new(MockSink::new());
-        let mut mgr =
-            SglangKvManager::new(100, 1, KvEventPublishers::new(Some(sink.clone()), None), 0);
+        let mut mgr = SglangKvManager::new(100, 1, KvEventPublishers::new(Some(sink.clone())), 0);
 
         let req1 = mgr.allocate_for_request(&[1, 2, 3]).unwrap();
         let req2 = mgr.allocate_for_request(&[1, 2, 3]).unwrap();
 
         let events = sink.clone_events();
         assert_eq!(events.len(), 1);
-        let KvCacheEventData::Stored(store) = &events[0].data else {
+        let NativeKvEventData::Stored(store) = &events[0].data else {
             panic!("expected stored event");
         };
         assert_eq!(store.blocks.len(), 3);
@@ -1438,218 +1386,10 @@ mod tests {
         mgr.free_pages(&req2.lease.pages);
         let events = sink.clone_events();
         assert_eq!(events.len(), 2);
-        let KvCacheEventData::Removed(remove) = &events[1].data else {
+        let NativeKvEventData::Removed { block_hashes } = &events[1].data else {
             panic!("expected removed event");
         };
-        assert_eq!(remove.block_hashes.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn test_duplicate_completion_releases_unretained_pages_and_removes_on_eviction() {
-        let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
-        let harness = RouterIndexerHarness::new(1, ROUTER_TEST_WORKER_ID);
-        let mut mgr = SglangKvManager::new(100, 1, KvEventPublishers::new(Some(sink), None), 0);
-        let tokens = [1, 2, 3];
-
-        let req1 = mgr.allocate_for_request(&tokens).unwrap();
-        let req2 = mgr.allocate_for_request(&tokens).unwrap();
-        assert_eq!(
-            mgr.cache().page_pool.available(),
-            94,
-            "both identical requests should allocate before either is cached"
-        );
-
-        let allocation_events = buffer.drain();
-        assert_eq!(
-            stored_event_count(&allocation_events),
-            1,
-            "duplicate allocation should emit only one logical Stored event"
-        );
-        let query_hashes = stored_hashes(&allocation_events);
-        assert_eq!(query_hashes.len(), tokens.len());
-        harness.apply_events(allocation_events).await;
-
-        mgr.finish(&tokens, req1.lease);
-        let req1_completion_events = buffer.drain();
-        assert_eq!(
-            stored_event_count(&req1_completion_events),
-            0,
-            "first completion should not re-emit Stored blocks"
-        );
-        assert_eq!(
-            removed_event_count(&req1_completion_events),
-            0,
-            "canonical completion should not emit Removed blocks"
-        );
-        assert_eq!(
-            mgr.cache().page_pool.available(),
-            94,
-            "canonical completion should retain the first request's slots"
-        );
-
-        mgr.finish(&tokens, req2.lease);
-        let req2_completion_events = buffer.drain();
-        assert_eq!(
-            stored_event_count(&req2_completion_events),
-            0,
-            "duplicate completion should not re-emit Stored blocks"
-        );
-        assert_eq!(
-            removed_event_count(&req2_completion_events),
-            0,
-            "duplicate completion should only decrement duplicate refcounts"
-        );
-        assert_eq!(
-            mgr.cache().page_pool.available(),
-            97,
-            "duplicate completion should return unretained request slots"
-        );
-        assert_eq!(harness.overlap_for_hashes(query_hashes.clone()).await, 3);
-
-        mgr.evict(tokens.len());
-        let eviction_events = buffer.drain();
-        assert_eq!(
-            removed_event_count(&eviction_events),
-            1,
-            "evicting the canonical sequence should emit one logical Removed event"
-        );
-        assert_eq!(
-            removed_block_count(&eviction_events),
-            tokens.len(),
-            "Removed event should cover every cached block"
-        );
-        harness.apply_events(eviction_events).await;
-        assert_eq!(harness.overlap_for_hashes(query_hashes).await, 0);
-        harness.shutdown();
-    }
-
-    #[tokio::test]
-    async fn retained_tail_eviction_preserves_page_granular_prefix_reuse() {
-        let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
-        let harness = RouterIndexerHarness::new(4, ROUTER_TEST_WORKER_ID);
-        let mut mgr = SglangKvManager::new(8, 4, KvEventPublishers::new(Some(sink), None), 0);
-        let tokens = [1, 2, 3, 4, 5, 6, 7, 8];
-
-        let mut request = mgr.allocate_for_request(&tokens[..4]).unwrap();
-        mgr.extend_cached_prefix(&tokens[..4], &mut request.lease);
-        assert!(mgr.extend_allocation(&tokens, &mut request.lease));
-        mgr.extend_cached_prefix(&tokens, &mut request.lease);
-        mgr.finish(&tokens, request.lease);
-
-        let stored_events = buffer.drain();
-        let query_hashes = stored_hashes(&stored_events);
-        assert_eq!(query_hashes.len(), 2);
-        harness.apply_events(stored_events).await;
-        assert_eq!(harness.overlap_for_hashes(query_hashes.clone()).await, 2);
-        assert_eq!(mgr.cache().evictable_size, 8);
-        assert_eq!(mgr.cache().page_pool.available(), 0);
-
-        mgr.evict(4);
-        let eviction_events = buffer.drain();
-        assert_eq!(removed_event_count(&eviction_events), 1);
-        assert_eq!(removed_block_count(&eviction_events), 1);
-        harness.apply_events(eviction_events).await;
-
-        assert_eq!(mgr.cache().prefix_match_len(&tokens), 4);
-        assert_eq!(mgr.cache().evictable_size, 4);
-        assert_eq!(mgr.cache().protected_size, 0);
-        assert_eq!(mgr.cache().page_pool.available(), 4);
-        assert_eq!(harness.overlap_for_hashes(query_hashes).await, 1);
-        harness.shutdown();
-    }
-
-    #[test]
-    fn unfinished_duplicate_canonicalization_prevents_missing_parent() {
-        let (buffer, sink) = capture_router_event_sink(ROUTER_TEST_WORKER_ID);
-        let mut mgr = SglangKvManager::new(32, 4, KvEventPublishers::new(Some(sink), None), 0);
-        let mut indexer = RadixTree::new();
-
-        let seed_tokens = [1, 2, 3, 4];
-        let seed = mgr.allocate_for_request(&seed_tokens).unwrap();
-        mgr.finish(&seed_tokens, seed.lease);
-        for event in buffer.drain() {
-            indexer.apply_event(event).unwrap();
-        }
-
-        // Two requests miss the same suffix before either inserts it. Their
-        // physical suffix pages are distinct even though the logical block is
-        // identical.
-        let shared_tokens = [1, 2, 3, 4, 5, 6, 7, 8];
-        let mut first = mgr.allocate_for_request(&shared_tokens).unwrap();
-        let mut duplicate = mgr.allocate_for_request(&shared_tokens).unwrap();
-        let first_suffix_page = seed_tokens.len() / mgr.cache().page_size();
-        let duplicate_suffix = duplicate.lease.pages()[first_suffix_page..].to_vec();
-        assert_ne!(
-            first.lease.pages()[first_suffix_page..],
-            duplicate.lease.pages()[first_suffix_page..]
-        );
-        for event in buffer.drain() {
-            indexer.apply_event(event).unwrap();
-        }
-
-        mgr.extend_cached_prefix(&shared_tokens, &mut first.lease);
-        mgr.extend_cached_prefix(&shared_tokens, &mut duplicate.lease);
-        assert_eq!(
-            duplicate.lease.pages(),
-            first.lease.pages(),
-            "the active duplicate must switch to radix-owned canonical pages"
-        );
-        assert_eq!(
-            mgr.cache().page_pool.available(),
-            24,
-            "every duplicate slot in the four-token page must return to the pool"
-        );
-        assert!(
-            duplicate_suffix
-                .iter()
-                .all(|page| !duplicate.lease.pages().contains(page)),
-            "no duplicate physical page may remain attached to the active request"
-        );
-        for event in buffer.drain() {
-            indexer.apply_event(event).unwrap();
-        }
-
-        // Mirror retracting the duplicate after its full prefix was cached,
-        // then finish and evict the canonical request.
-        assert!(mgr.retract(duplicate.lease));
-        mgr.finish(&shared_tokens, first.lease);
-        mgr.evict(seed_tokens.len());
-        mgr.evict(seed_tokens.len());
-        for event in buffer.drain() {
-            indexer.apply_event(event).unwrap();
-        }
-
-        // Restore only the first block, then extend through the formerly
-        // duplicated block. A leaked duplicate publisher refcount would
-        // suppress re-storing block 2 and emit block 3 with a missing parent.
-        let restored = mgr.allocate_for_request(&seed_tokens).unwrap();
-        mgr.finish(&seed_tokens, restored.lease);
-        for event in buffer.drain() {
-            indexer.apply_event(event).unwrap();
-        }
-
-        let extended = mgr
-            .allocate_for_request(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
-            .unwrap();
-        let extension_events = buffer.drain();
-        assert_eq!(stored_event_count(&extension_events), 1);
-        let store = extension_events
-            .iter()
-            .find_map(|event| match &event.event.data {
-                KvCacheEventData::Stored(store) => Some(store),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(
-            store.blocks.len(),
-            2,
-            "both missing descendants must be stored"
-        );
-        for event in extension_events {
-            indexer.apply_event(event).unwrap();
-        }
-
-        assert!(mgr.abort(extended.lease));
+        assert_eq!(block_hashes.len(), 3);
     }
 
     #[test]
@@ -1665,8 +1405,7 @@ mod tests {
     #[test]
     fn cache_unfinished_rejects_invalid_range_before_publishing() {
         let sink = Arc::new(MockSink::new());
-        let mut mgr =
-            SglangKvManager::new(8, 4, KvEventPublishers::new(Some(sink.clone()), None), 0);
+        let mut mgr = SglangKvManager::new(8, 4, KvEventPublishers::new(Some(sink.clone())), 0);
         let tokens = [1, 2, 3, 4];
         let mut alloc = mgr.allocate_for_request(&tokens).unwrap();
         let events_before = sink.event_count();
@@ -1684,8 +1423,7 @@ mod tests {
     #[test]
     fn cache_unfinished_rejects_short_page_list_before_publishing() {
         let sink = Arc::new(MockSink::new());
-        let mut mgr =
-            SglangKvManager::new(8, 4, KvEventPublishers::new(Some(sink.clone()), None), 0);
+        let mut mgr = SglangKvManager::new(8, 4, KvEventPublishers::new(Some(sink.clone())), 0);
         let tokens = [1, 2, 3, 4, 5, 6, 7, 8];
         let mut alloc = mgr.allocate_for_request(&tokens).unwrap();
         alloc.lease.pages.truncate(1);
@@ -1714,8 +1452,7 @@ mod tests {
     #[test]
     fn test_chunked_prefill_parent_hash() {
         let sink = Arc::new(MockSink::new());
-        let mut mgr =
-            SglangKvManager::new(32, 1, KvEventPublishers::new(Some(sink.clone()), None), 0);
+        let mut mgr = SglangKvManager::new(32, 1, KvEventPublishers::new(Some(sink.clone())), 0);
         let tokens = [11, 22, 33, 44, 55, 66];
         let chunk1_len = 3;
         let chunk2_len = 6;
@@ -1729,10 +1466,10 @@ mod tests {
         let events = sink.events.lock().unwrap();
         assert_eq!(events.len(), 2, "expected two stored events");
 
-        let KvCacheEventData::Stored(store1) = &events[0].data else {
+        let NativeKvEventData::Stored(store1) = &events[0].data else {
             panic!("expected first event to be Stored");
         };
-        let KvCacheEventData::Stored(store2) = &events[1].data else {
+        let NativeKvEventData::Stored(store2) = &events[1].data else {
             panic!("expected second event to be Stored");
         };
 

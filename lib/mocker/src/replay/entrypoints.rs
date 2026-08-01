@@ -2149,7 +2149,7 @@ pub fn simulate_concurrency_live_workload_with_router_mode_and_options(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocols::{EngineType, G1Backend, SglangArgs, WorkerType};
+    use crate::common::protocols::{EngineType, SglangArgs, WorkerType};
     use crate::loadgen::{SessionTrace, TurnTrace};
     use rstest::rstest;
     use std::io::Write;
@@ -2165,37 +2165,6 @@ mod tests {
             .speedup_ratio(1000.0)
             .build()
             .unwrap()
-    }
-
-    fn online_offload_test_args() -> MockEngineArgs {
-        MockEngineArgs::builder()
-            .block_size(4)
-            .num_gpu_blocks(4)
-            .max_num_batched_tokens(Some(16))
-            .max_num_seqs(Some(2))
-            .enable_prefix_caching(true)
-            .enable_chunked_prefill(true)
-            .speedup_ratio(1000.0)
-            .kv_bytes_per_token(Some(1))
-            .num_g2_blocks(Some(8))
-            .offload_batch_size(Some(1))
-            .bandwidth_g1_to_g2_gbps(Some(1.0))
-            .bandwidth_g2_to_g1_gbps(Some(1.0))
-            .build()
-            .unwrap()
-    }
-
-    fn online_offload_test_requests() -> Vec<DirectRequest> {
-        [1_u128, 2, 3]
-            .into_iter()
-            .map(|uuid| DirectRequest {
-                tokens: vec![uuid as u32; 8],
-                max_output_tokens: 1,
-                uuid: Some(Uuid::from_u128(uuid)),
-                arrival_timestamp_ms: Some((uuid - 1) as f64 * 100.0),
-                ..Default::default()
-            })
-            .collect()
     }
 
     fn disagg_test_config() -> OfflineDisaggReplayConfig {
@@ -2329,64 +2298,6 @@ mod tests {
     }
 
     #[test]
-    fn online_public_entrypoints_reject_g3_and_g4_without_starting_runtime() {
-        let expected =
-            "online replay does not support G3 or G4 KV offload; only G1/G2 offload is supported";
-        let assert_rejected = |args: MockEngineArgs| {
-            let trace_error = simulate_trace_live_requests_with_router_mode(
-                args.clone(),
-                None,
-                None,
-                online_offload_test_requests(),
-                4,
-                1.0,
-                ReplayRouterMode::KvRouter,
-            )
-            .unwrap_err();
-            assert_eq!(trace_error.to_string(), expected);
-
-            let concurrency_error = simulate_concurrency_live_requests_with_router_mode(
-                args,
-                None,
-                None,
-                online_offload_test_requests(),
-                32,
-                4,
-                ReplayRouterMode::KvRouter,
-            )
-            .unwrap_err();
-            assert_eq!(concurrency_error.to_string(), expected);
-        };
-
-        let mut g3_args = online_offload_test_args();
-        g3_args.num_g3_blocks = Some(8);
-        assert_rejected(g3_args);
-
-        let mut g4_args = online_offload_test_args();
-        g4_args.enable_g4_storage = true;
-        assert_rejected(g4_args);
-    }
-
-    #[cfg(feature = "kvbm-offload")]
-    #[test]
-    fn online_public_entrypoint_runs_g2_offload_to_completion() {
-        let report = simulate_trace_live_requests_with_router_mode(
-            online_offload_test_args(),
-            None,
-            None,
-            online_offload_test_requests(),
-            1,
-            1.0,
-            ReplayRouterMode::KvRouter,
-        )
-        .unwrap();
-
-        assert_eq!(report.request_counts.completed_requests, 3);
-        assert_eq!(report.request_counts.total_input_tokens, 24);
-        assert_eq!(report.request_counts.total_output_tokens, 3);
-    }
-
-    #[test]
     fn loaded_dynamo_disagg_trace_validates_timestamps() {
         let error = simulate_loaded_trace_disagg_with_router_mode_and_options(
             disagg_test_config(),
@@ -2410,7 +2321,6 @@ mod tests {
     fn native_g1_runs_through_offline_replay_entrypoint(#[case] engine_type: EngineType) {
         let args = MockEngineArgs::builder()
             .engine_type(engine_type)
-            .g1_backend(G1Backend::Native)
             .block_size(4)
             .num_gpu_blocks(16)
             .max_num_batched_tokens(Some(16))
@@ -2485,7 +2395,7 @@ mod tests {
 
         assert_eq!(
             err.to_string(),
-            "offline replay reached a dead end with 1 in-flight requests remaining"
+            "replay invariant violated: offline replay detected an effect-free zero-duration pass with 1 in-flight requests remaining"
         );
     }
 

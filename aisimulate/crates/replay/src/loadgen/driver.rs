@@ -306,7 +306,7 @@ pub struct WorkloadDriver {
 }
 
 impl WorkloadDriver {
-    pub(crate) fn new_trace(trace: Trace, engine_block_size: usize) -> Result<Self> {
+    pub fn new_trace(trace: Trace, engine_block_size: usize) -> Result<Self> {
         Self::new(
             trace,
             engine_block_size,
@@ -316,7 +316,7 @@ impl WorkloadDriver {
         )
     }
 
-    pub(crate) fn new_trace_without_replay_hashes(
+    pub fn new_trace_without_replay_hashes(
         trace: Trace,
         engine_block_size: usize,
         accumulate_session_deltas: bool,
@@ -336,10 +336,7 @@ impl WorkloadDriver {
         )
     }
 
-    pub(crate) fn new_trace_accumulating_deltas(
-        trace: Trace,
-        engine_block_size: usize,
-    ) -> Result<Self> {
+    pub fn new_trace_accumulating_deltas(trace: Trace, engine_block_size: usize) -> Result<Self> {
         Self::new(
             trace,
             engine_block_size,
@@ -352,7 +349,7 @@ impl WorkloadDriver {
     /// Build a closed-loop concurrency driver. `max_in_flight` is the *session* cap
     /// (depth-first): a session holds its slot across all turns + think-time, and new
     /// sessions are admitted only while fewer than `max_in_flight` are active.
-    pub(crate) fn new_concurrency(
+    pub fn new_concurrency(
         trace: Trace,
         engine_block_size: usize,
         max_in_flight: usize,
@@ -366,7 +363,7 @@ impl WorkloadDriver {
         )
     }
 
-    pub(crate) fn new_concurrency_without_replay_hashes(
+    pub fn new_concurrency_without_replay_hashes(
         trace: Trace,
         engine_block_size: usize,
         max_in_flight: usize,
@@ -387,7 +384,7 @@ impl WorkloadDriver {
         )
     }
 
-    pub(crate) fn new_concurrency_accumulating_deltas(
+    pub fn new_concurrency_accumulating_deltas(
         trace: Trace,
         engine_block_size: usize,
         max_in_flight: usize,
@@ -401,11 +398,11 @@ impl WorkloadDriver {
         )
     }
 
-    pub(crate) fn new_agentic_trace(trace: AgenticTrace, engine_block_size: usize) -> Result<Self> {
+    pub fn new_agentic_trace(trace: AgenticTrace, engine_block_size: usize) -> Result<Self> {
         Self::new_agentic_trace_with_replay_hashes(trace, engine_block_size, true)
     }
 
-    pub(crate) fn new_agentic_trace_without_replay_hashes(
+    pub fn new_agentic_trace_without_replay_hashes(
         trace: AgenticTrace,
         engine_block_size: usize,
     ) -> Result<Self> {
@@ -660,7 +657,7 @@ impl WorkloadDriver {
         Uuid::new_v4()
     }
 
-    pub(crate) fn without_session_metadata(mut self) -> Self {
+    pub fn without_session_metadata(mut self) -> Self {
         self.emit_session_metadata = false;
         self
     }
@@ -687,7 +684,8 @@ impl WorkloadDriver {
             .collect()
     }
 
-    pub(crate) fn pop_ready_compact(&mut self, now_ms: f64, limit: usize) -> Vec<CompactReadyTurn> {
+    #[doc(hidden)]
+    pub fn pop_ready_compact(&mut self, now_ms: f64, limit: usize) -> Vec<CompactReadyTurn> {
         let effective_limit = self.policy.dispatch_limit(limit, self.in_flight.len());
         if effective_limit == 0 {
             return Vec::new();
@@ -736,10 +734,12 @@ impl WorkloadDriver {
                         output_token_ids: turn.output_token_ids.take(),
                         uuid: Some(request_uuid),
                         dp_rank: 0,
+                        preferred_dp_rank: None,
                         arrival_timestamp_ms,
                         priority: turn.priority,
                         strict_priority: turn.strict_priority,
                         policy_class: turn.policy_class.clone(),
+                        replay_context: None,
                     };
                     let request = ReplayRequestPayload::deferred(
                         request_metadata,
@@ -776,10 +776,12 @@ impl WorkloadDriver {
                         output_token_ids: turn.output_token_ids.clone(),
                         uuid: Some(request_uuid),
                         dp_rank: 0,
+                        preferred_dp_rank: None,
                         arrival_timestamp_ms,
                         priority: turn.priority,
                         strict_priority: turn.strict_priority,
                         policy_class: turn.policy_class.clone(),
+                        replay_context: None,
                     });
                     (request, replay_hashes)
                 }

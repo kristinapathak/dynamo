@@ -450,7 +450,6 @@
 /lib/mocker/src/kv_manager/                                                  @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/mocker/README.md                                                 @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/burstgpt_loadgen/                                                @ai-dynamo/dynamo-performance-codeowners
-/lib/mocker/src/kvbm_offload/                                                @ai-dynamo/dynamo-performance-codeowners
 /recipes/qwen3-235b-a22b-fp8/                                                @ai-dynamo/dynamo-performance-codeowners
 /components/src/dynamo/mocker/                                               @ai-dynamo/dynamo-performance-codeowners
 /components/src/dynamo/replay/                                               @ai-dynamo/dynamo-performance-codeowners
@@ -610,7 +609,6 @@
 /benchmarks/multimodal/image/                                                @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/multimodal/sweep/                                                @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-performance-codeowners
 /lib/llm/src/fpm_publisher.rs                                                @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
-/lib/mocker/src/kvbm_offload/                                                @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/kvbm-logical/src/metrics/                                               @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/protocols/agents.rs                                             @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-agents-codeowners
 /lib/runtime/src/health_check.rs                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners

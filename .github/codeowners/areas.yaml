@@ -517,7 +517,6 @@ areas:
   - lib/mocker/src/cache/
   - lib/mocker/src/common/
   - lib/mocker/src/kv_manager/
-  - lib/mocker/src/kvbm_offload/
   - lib/mocker/src/loadgen/
   - lib/mocker/src/replay/
   - lib/mocker/src/scheduler/
@@ -1032,10 +1031,6 @@ shared:
   - frontend
   - diffusion
 - glob: lib/mocker/src/kv_manager/
-  owners:
-  - performance
-  - kv-memory
-- glob: lib/mocker/src/kvbm_offload/
   owners:
   - performance
   - kv-memory

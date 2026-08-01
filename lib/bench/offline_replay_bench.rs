@@ -14,8 +14,6 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
-#[cfg(feature = "mocker-kvbm-offload")]
-use anyhow::ensure;
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use dynamo_mocker::common::protocols::{
@@ -197,50 +195,6 @@ struct Args {
     #[arg(long, value_enum, default_value_t = KvTransferTimingModeArg::FullPrompt)]
     kv_transfer_timing_mode: KvTransferTimingModeArg,
 
-    /// KVBM G2 host-memory block capacity
-    #[cfg(feature = "mocker-kvbm-offload")]
-    #[arg(long)]
-    num_g2_blocks: Option<usize>,
-
-    /// KVBM G3 shared lower-tier block capacity
-    #[cfg(feature = "mocker-kvbm-offload")]
-    #[arg(long)]
-    num_g3_blocks: Option<usize>,
-
-    /// Enable KVBM mock G4 object storage
-    #[cfg(feature = "mocker-kvbm-offload")]
-    #[arg(long)]
-    enable_g4_storage: bool,
-
-    /// KVBM G1-to-G2 offload batch size
-    #[cfg(feature = "mocker-kvbm-offload")]
-    #[arg(long)]
-    offload_batch_size: Option<usize>,
-
-    #[cfg(feature = "mocker-kvbm-offload")]
-    #[arg(long)]
-    bandwidth_g1_to_g2_gbps: Option<f64>,
-
-    #[cfg(feature = "mocker-kvbm-offload")]
-    #[arg(long)]
-    bandwidth_g2_to_g1_gbps: Option<f64>,
-
-    #[cfg(feature = "mocker-kvbm-offload")]
-    #[arg(long)]
-    bandwidth_g2_to_g3_gbps: Option<f64>,
-
-    #[cfg(feature = "mocker-kvbm-offload")]
-    #[arg(long)]
-    bandwidth_g3_to_g2_gbps: Option<f64>,
-
-    #[cfg(feature = "mocker-kvbm-offload")]
-    #[arg(long)]
-    bandwidth_g2_to_g4_gbps: Option<f64>,
-
-    #[cfg(feature = "mocker-kvbm-offload")]
-    #[arg(long)]
-    bandwidth_g4_to_g2_gbps: Option<f64>,
-
     /// Optional path to write the full replay report as pretty JSON
     #[arg(long)]
     report_json: Option<PathBuf>,
@@ -290,30 +244,6 @@ fn build_engine_args(args: &Args) -> Result<MockEngineArgs> {
     }
     if let Some(decode_speedup_ratio) = args.decode_speedup_ratio {
         builder = builder.decode_speedup_ratio(decode_speedup_ratio);
-    }
-    #[cfg(feature = "mocker-kvbm-offload")]
-    {
-        if args.num_g2_blocks.is_some() {
-            ensure!(
-                args.engine_type == EngineTypeArg::Vllm,
-                "KVBM offload requires --engine-type vllm"
-            );
-            ensure!(
-                args.kv_bytes_per_token.is_some(),
-                "KVBM offload requires --kv-bytes-per-token"
-            );
-        }
-        builder = builder
-            .num_g2_blocks(args.num_g2_blocks)
-            .num_g3_blocks(args.num_g3_blocks)
-            .enable_g4_storage(args.enable_g4_storage)
-            .offload_batch_size(args.offload_batch_size)
-            .bandwidth_g1_to_g2_gbps(args.bandwidth_g1_to_g2_gbps)
-            .bandwidth_g2_to_g1_gbps(args.bandwidth_g2_to_g1_gbps)
-            .bandwidth_g2_to_g3_gbps(args.bandwidth_g2_to_g3_gbps)
-            .bandwidth_g3_to_g2_gbps(args.bandwidth_g3_to_g2_gbps)
-            .bandwidth_g2_to_g4_gbps(args.bandwidth_g2_to_g4_gbps)
-            .bandwidth_g4_to_g2_gbps(args.bandwidth_g4_to_g2_gbps);
     }
     builder
         .build()

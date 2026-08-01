@@ -1,27 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(test)]
-pub(in crate::replay) use dynamo_kv_router::protocols::KvCacheEventData;
-use dynamo_kv_router::protocols::RouterEvent;
-#[cfg(all(test, feature = "kvbm-offload"))]
-pub(in crate::replay) use dynamo_kv_router::protocols::StorageTier;
+use aisimulate_engine::NativeKvEvent;
+use anyhow::Context;
+use dynamo_kv_router::protocols::{RouterEvent, StorageTier};
 
-use super::super::components::{
-    AdmissionQueue, NoReplayMetadata, ObservedWorkerEvents, ReplayEngineObservation, ReplayMode,
-    ReplayWorkerCore,
-};
-use super::super::core::EngineEventBatch;
-use super::super::core::round_robin::PoolRoundRobinPlacement;
-use super::super::disagg::DisaggRuntimeImpl;
-use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use crate::common::protocols::{MockEngineArgs, OutputSignal};
 use crate::loadgen::Trace;
+use crate::native_observations::dynamo_kv_event;
 use crate::replay::{
-    OfflineDisaggReplayConfig, ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest,
-    ReplayWorkerArtifacts, TraceCollector,
+    ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
 };
 use crate::scheduler::RouterEventVisibility;
-use std::collections::VecDeque;
+use aisimulate_replay::{
+    CURRENT_REPLAY_SPEC_VERSION, EngineEventBatch, ProviderSpec, ReplayAdapters,
+    ReplayArtifactKvEventVisibility, ReplayEngineObservation, ReplayRuntimeInput, ReplaySpec,
+    ReplayTopology, Replayer, WorkerPoolSpec, WorkerStage,
+};
 
 #[derive(Debug, Default)]
 pub(in crate::replay) struct RouterEventBatch(pub Vec<RouterEvent>);
@@ -44,30 +39,25 @@ pub(in crate::replay) struct RouterEventObservation;
 impl ReplayEngineObservation for RouterEventObservation {
     type Batch = RouterEventBatch;
 
-    const CAPTURE_RAW: bool = true;
+    const CAPTURE_NATIVE_KV_EVENTS: bool = true;
 
-    #[inline]
-    fn take_pass_events(pass: &mut crate::scheduler::EnginePassResult) -> Self::Batch {
-        Self::take(&mut pass.kv_events)
-    }
-
-    #[inline]
-    fn take_command_events(effects: &mut crate::scheduler::SchedulerCommandEffects) -> Self::Batch {
-        Self::take(&mut effects.kv_events)
-    }
-
-    #[inline]
-    fn drain_worker_events(
-        worker: &super::super::state::OfflineWorkerState,
-    ) -> ObservedWorkerEvents<Self::Batch> {
-        let mut events = worker.engine_core().drain_kv_events();
-        ObservedWorkerEvents::from_events(Self::take(&mut events))
-    }
-
-    #[cfg(feature = "kvbm-offload")]
-    #[inline]
-    fn take_offload_events(effects: &mut crate::scheduler::OffloadTickEffects) -> Self::Batch {
-        Self::take(&mut effects.kv_events)
+    fn observe_native_events(
+        _stage: WorkerStage,
+        worker_id: usize,
+        _dp_rank: u32,
+        events: Vec<NativeKvEvent>,
+    ) -> Self::Batch {
+        let worker_id = u64::try_from(worker_id)
+            .expect("logical replay worker id must fit the Dynamo Router wire type");
+        RouterEventBatch(
+            events
+                .into_iter()
+                .map(|event| {
+                    let (event, _) = dynamo_kv_event(event);
+                    RouterEvent::with_storage_tier(worker_id, event, StorageTier::Device)
+                })
+                .collect(),
+        )
     }
 
     fn stored_hashes(batch: &Self::Batch) -> Vec<u64> {
@@ -86,42 +76,6 @@ impl ReplayEngineObservation for RouterEventObservation {
     }
 }
 
-impl RouterEventObservation {
-    #[inline]
-    fn take(events: &mut Vec<RouterEvent>) -> RouterEventBatch {
-        RouterEventBatch(std::mem::take(events))
-    }
-}
-
-pub(in crate::replay) type HandoffDisaggRuntime = DisaggRuntimeImpl<
-    PoolRoundRobinPlacement<RouterEventBatch>,
-    RouterEventObservation,
-    NoReplayMetadata,
->;
-
-impl
-    DisaggRuntimeImpl<
-        PoolRoundRobinPlacement<RouterEventBatch>,
-        RouterEventObservation,
-        NoReplayMetadata,
-    >
-{
-    pub(in crate::replay) fn new_handoff_conformance(
-        config: &OfflineDisaggReplayConfig,
-        pending: VecDeque<DirectRequest>,
-    ) -> anyhow::Result<Self> {
-        Self::new_composed(
-            config,
-            AdmissionQueue::new_requests(pending, ReplayMode::Trace),
-            false,
-            true,
-            true,
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
-            |_, topology| Ok(PoolRoundRobinPlacement::new(topology)),
-        )
-    }
-}
-
 fn timestamp_us_from_ms(timestamp_ms: f64) -> u64 {
     if !timestamp_ms.is_finite() || timestamp_ms <= 0.0 {
         return 0;
@@ -137,74 +91,72 @@ pub(in crate::replay) fn generate_trace_worker_artifacts_with_visibility(
 ) -> anyhow::Result<ReplayWorkerArtifacts> {
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
-    let mut worker = ReplayWorkerCore::new_with_kv_capture(args, u64::default());
-    let mut driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
-    let mut collector = TraceCollector::default();
-    let mut artifacts = ReplayWorkerArtifacts::default();
-    let mut current_time_ms = 0.0;
+    let (engine, factory) = crate::native_config::native_aggregated_replay_setup(&args)?;
+    let driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
+    let spec = ReplaySpec {
+        version: CURRENT_REPLAY_SPEC_VERSION,
+        topology: ReplayTopology::Aggregated {
+            workers: WorkerPoolSpec::default(),
+        },
+        engine: serde_json::to_value(engine)?,
+        adapters: ReplayAdapters {
+            placement: ProviderSpec::round_robin(),
+            scaling: ProviderSpec::no_scaling(),
+        },
+        max_sim_time_ms: None,
+        max_in_flight: None,
+        record_per_request: false,
+        sla: Default::default(),
+        requests: Vec::new(),
+    };
+    let visibility = match router_event_visibility_override {
+        None => ReplayArtifactKvEventVisibility::Native,
+        Some(RouterEventVisibility::PassStart) => ReplayArtifactKvEventVisibility::PassStart,
+        Some(RouterEventVisibility::PassEnd) => ReplayArtifactKvEventVisibility::PassEnd,
+    };
+    let (_, artifacts) = Replayer::new(spec, factory)?
+        .with_runtime_input(ReplayRuntimeInput::Workload(driver))
+        .run_with_artifacts(visibility)?;
 
-    while !driver.is_drained() || !worker.is_empty() {
-        for ready_turn in driver.pop_ready(current_time_ms, usize::MAX) {
-            let replay_hashes = ready_turn
-                .replay_hashes
-                .ok_or_else(|| anyhow::anyhow!("offline artifacts require synthesized hashes"))?;
-            collector.on_arrival(
-                ready_turn.request_uuid,
-                ready_turn.scheduled_ready_at_ms,
-                ready_turn.request.tokens.len(),
-                ready_turn.request.max_output_tokens,
-            );
-            artifacts.requests.push(ReplayTimedRequest {
-                uuid: ready_turn.request_uuid,
-                timestamp_us: timestamp_us_from_ms(current_time_ms),
-                scheduled_ready_at_ms: ready_turn.scheduled_ready_at_ms,
-                input_length: ready_turn.request.tokens.len(),
-                output_length: ready_turn.request.max_output_tokens,
-                replay_hashes,
-            });
-            worker.receive(ready_turn.request);
-        }
-
-        if worker.is_empty() {
-            let Some(next_ready_ms) = driver.next_ready_time_ms() else {
-                break;
-            };
-            current_time_ms = next_ready_ms;
-            continue;
-        }
-
-        let pass_start_ms = current_time_ms;
-        let pass = worker.execute_pass(&mut collector, current_time_ms)?;
-        current_time_ms = pass.end_ms;
-
-        let router_event_visibility =
-            router_event_visibility_override.unwrap_or(pass.router_event_visibility);
-        let kv_event_timestamp_us = match router_event_visibility {
-            RouterEventVisibility::PassStart => timestamp_us_from_ms(pass_start_ms),
-            RouterEventVisibility::PassEnd => timestamp_us_from_ms(current_time_ms),
-        };
-        artifacts
+    Ok(ReplayWorkerArtifacts {
+        requests: artifacts
+            .requests
+            .into_iter()
+            .map(|request| {
+                Ok(ReplayTimedRequest {
+                    uuid: request.request_id,
+                    timestamp_us: timestamp_us_from_ms(request.observed_at_ms),
+                    scheduled_ready_at_ms: request.scheduled_ready_at_ms,
+                    input_length: request.input_length,
+                    output_length: request.output_length,
+                    replay_hashes: request
+                        .replay_hashes
+                        .context("offline artifacts require synthesized replay hashes")?,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
+        output_signals: artifacts
+            .outputs
+            .into_iter()
+            .map(|output| ReplayTimedOutputSignal {
+                signal: OutputSignal {
+                    uuid: output.request_id,
+                    token_id: output.token_id,
+                    completed: output.completed,
+                    rejected: output.rejected,
+                    handoff_delay_ms: None,
+                },
+                timestamp_us: timestamp_us_from_ms(output.observed_at_ms),
+            })
+            .collect(),
+        kv_events: artifacts
             .kv_events
-            .extend(pass.kv_events.into_iter().map(|event| ReplayTimedKvEvent {
-                storage_tier: event.storage_tier,
-                event: event.event,
-                timestamp_us: kv_event_timestamp_us,
-            }));
-
-        let output_timestamp_us = timestamp_us_from_ms(current_time_ms);
-        for signal in pass.output_signals {
-            if let Some(token_id) = signal.token_id {
-                driver.on_output_token(signal.uuid, token_id)?;
-            }
-            if signal.completed {
-                driver.on_terminal(signal.uuid, current_time_ms, signal.rejected)?;
-            }
-            artifacts.output_signals.push(ReplayTimedOutputSignal {
-                signal,
-                timestamp_us: output_timestamp_us,
-            });
-        }
-    }
-
-    Ok(artifacts)
+            .into_iter()
+            .map(|event| ReplayTimedKvEvent {
+                storage_tier: StorageTier::Device,
+                event: dynamo_kv_event(event.event).0,
+                timestamp_us: timestamp_us_from_ms(event.observed_at_ms),
+            })
+            .collect(),
+    })
 }

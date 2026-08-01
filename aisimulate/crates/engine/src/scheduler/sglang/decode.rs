@@ -7,6 +7,7 @@ use crate::common::protocols::OutputSignal;
 use crate::common::speculative::SpeculativeDecodeSampler;
 use crate::common::utils::compute_prefill_handoff_delay_ms;
 use crate::kv_manager::SglangKvManager;
+use crate::native::modeled_duration_ms;
 
 use super::config::{SglangConfig, floor_to_block};
 use super::request::SglangRequest;
@@ -254,13 +255,10 @@ pub(super) fn simulate_decode_step_with_sampler(
         avg_context,
         config.total_kv_tokens,
     )?;
-    let unscaled_time = Duration::from_secs_f64(decode_time / 1000.0);
     let effective_ratio = config.speedup_ratio * config.decode_speedup_ratio;
-    let total_time = if apply_speedup && effective_ratio > 0.0 && unscaled_time > Duration::ZERO {
-        Duration::from_secs_f64(unscaled_time.as_secs_f64() / effective_ratio)
-    } else {
-        unscaled_time
-    };
+    let speedup_ratio = if apply_speedup { effective_ratio } else { 0.0 };
+    let modeled_ms = modeled_duration_ms(decode_time, speedup_ratio)?;
+    let total_time = Duration::from_secs_f64(modeled_ms / 1_000.0);
 
     let reserved_page_tokens = decode_page_growth_needed(running, config.block_size, max_burst);
     let reserved_pages = reserved_page_tokens / config.block_size;

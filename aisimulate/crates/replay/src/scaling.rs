@@ -9,10 +9,9 @@
 //! component; this trait only observes a settled snapshot and returns desired
 //! non-draining capacity.
 
-use std::collections::BTreeMap;
-
 use super::components::TrafficStats;
-use crate::common::protocols::ForwardPassSnapshot;
+use crate::protocol::ForwardPassSnapshot;
+use std::collections::BTreeMap;
 
 const IDLE_FPM_INTERVAL_MS: f64 = 1_000.0;
 
@@ -78,7 +77,7 @@ impl LatestFpmBuffer {
 #[cfg(test)]
 mod tests {
     use super::LatestFpmBuffer;
-    use crate::common::protocols::ForwardPassSnapshot;
+    use crate::protocol::ForwardPassSnapshot;
 
     #[test]
     fn latest_fpm_buffer_coalesces_each_worker_rank() {
@@ -242,4 +241,21 @@ pub trait ReplayScalingPolicy {
     /// Drive one tick: decide scaling targets and the next tick time.
     fn on_tick(&mut self, snapshot: ReplayScalingSnapshot)
     -> anyhow::Result<ReplayScalingDecision>;
+}
+
+/// Scaling policy for replay compositions that keep capacity fixed.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoScaling;
+
+impl ReplayScalingPolicy for NoScaling {
+    fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+        Ok(f64::INFINITY)
+    }
+
+    fn on_tick(
+        &mut self,
+        _snapshot: ReplayScalingSnapshot,
+    ) -> anyhow::Result<ReplayScalingDecision> {
+        Ok(ReplayScalingDecision::default())
+    }
 }
