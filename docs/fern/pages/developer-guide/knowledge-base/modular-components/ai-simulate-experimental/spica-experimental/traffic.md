@@ -60,7 +60,7 @@ Every `Workload` field:
 | `turns_per_session` | `int` | `1` | Turns per multi-turn session. |
 | `inter_turn_delay_ms` | `float` | `0.0` | Think-time between turns in a multi-turn synthetic session, ms. |
 | `trace_path` | `str \| None` | `None` | Path to a replay trace (shape 1). Its presence selects the trace shape and **forbids** all synthetic fields. |
-| `trace_format` | `str` | `"mooncake"` | Replay-ready trace schema. The transitional Dynamo runner reads Mooncake traces; other runners may validate this field. |
+| `trace_format` | `str` | `"mooncake"` | Replay-ready trace schema. The Dynamo runner reads Mooncake traces; other runners may validate this field. |
 | `arrival_speedup_ratio` | `float` | `1.0` | Scales the trace's inter-arrival times (open-loop trace only). `>1` speeds arrivals up. |
 | `replay_concurrency` | `int \| None` | `None` | Closed-loop in-flight cap **for a trace** (shape 1c); when set, trace timestamps are ignored. For synthetic closed-loop use `concurrency` instead. |
 
@@ -138,13 +138,13 @@ when unset (`max(1, …)` keeps at least one request).
 ## Replay Routing
 
 Spica places the validated workload and concrete concurrency in `ReplaySpec`. The injected runner
-owns traffic execution. The transitional Dynamo runner maps each workload to the current Replay
-entry points:
+owns traffic execution. The Dynamo runner converts the specification and selected adapter hooks
+into one invocation of the shared Replayer:
 
 | Load | No Planner hook | Dynamo Planner hook |
 |---|---|---|
-| **mooncake trace** | `dynamo.replay.api.run_trace_replay(..., planner_config=None)` | `run_trace_replay(..., planner_config=<dict>)` |
-| **synthetic** (rate, fixed concurrency, or KV load) | `dynamo.replay.api.run_synthetic_trace_replay(..., planner_config=None)` | `run_synthetic_trace_replay(..., planner_config=<dict>)` |
+| **mooncake trace** | Shared Replayer with no-scaling policy | Shared Replayer with the selected Planner scaling policy |
+| **synthetic** (rate, fixed concurrency, or KV load) | Shared Replayer with no-scaling policy | Shared Replayer with the selected Planner scaling policy |
 
 Notes:
 
@@ -154,5 +154,5 @@ Notes:
   on every path **only when an SLA is configured** — `_goodput_sla_kwargs` returns `{}` when
   `goal.sla is None`, so no `sla_*` kwargs are passed and no goodput is computed. It is
   independent of the planner's own scaling SLA.
-- A `dynamo.router:placement_policy@1` hook becomes a `KvRouterConfig`. Without that hook, the
-  transitional runner uses round-robin routing and passes `router_config=None`.
+- A `dynamo.router:placement_policy@1` hook constructs the selected Dynamo placement policy.
+  Without that hook, the runner uses the Replayer's built-in round-robin policy.

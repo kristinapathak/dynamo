@@ -18,8 +18,7 @@ candidate as a versioned `ReplaySpec`, sends that specification to an injected r
 Spica does not import Dynamo. Dynamo-specific Planner and Router behavior lives in optional
 adapters published by the `ai-dynamo` wheel.
 
-Install `ai-dynamo[simulation]` when a sweep uses those adapters or the transitional Dynamo
-runner.
+Install `ai-dynamo[simulate]` when a sweep uses those adapters or the Dynamo runner.
 
 ## Documentation
 
@@ -92,10 +91,9 @@ The `ai-dynamo` wheel registers these package entry points:
 | `dynamo.planner` | Planner policies, load-predictor pre-sweep, and `PlannerConfig` materialization | `dynamo.planner:scaling_policy@1` |
 | `dynamo.router` | Round-robin and KV-router search and materialization | `dynamo.router:placement_policy@1` |
 
-The transitional `DynamoReplayRunnerFactory` translates those hooks to the current Dynamo Replay
-API. Replay is undergoing the same dependency split in parallel: a backend-only Spica composition
-will use the Dynamo-free replay runner, while a Dynamo composition will use the Dynamo replay
-runner.
+`DynamoReplayRunnerFactory` resolves those hooks into Dynamo-owned policies and injects them into
+the shared AI Simulate Replayer. A backend-only composition uses the built-in round-robin and
+no-scaling policies; a Dynamo composition can supply Router placement and Planner scaling policies.
 
 Planner performance queries use the `aiconfigurator-core` Python wheel directly and do not use a
 `dynamo._core` engine-performance binding.
@@ -106,5 +104,4 @@ Planner performance queries use the `aiconfigurator-core` Python wheel directly 
 - The runner advertises supported backend/topology pairs and runtime-hook versions before a study
   starts.
 - TensorRT-LLM disaggregated replay remains excluded by the current Dynamo runner capability.
-- KVBM fields are rejected with a migration error. Native G2 replaces KVBM; Spica does not forward
-  old host/disk offload settings.
+- KVBM fields are rejected as unsupported. Spica does not forward old host/disk offload settings.

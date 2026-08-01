@@ -68,7 +68,7 @@ flowchart TD
         S --> K["KV block manager"]
     end
 
-    T["KV transfer and offloading simulation"]
+    T["Prefill/decode KV handoff simulation"]
     R["KV router simulation"]
     P["Planner simulation adapter"]
     SES["Single-engine simulation"]
@@ -161,9 +161,8 @@ AIConfigurator is used in two distinct places:
 Keeping these paths separate makes it possible to test router estimates independently from engine
 timing.
 
-## Related implementation
+## Related documentation
 
-- [Offline replay internals](https://github.com/ai-dynamo/dynamo/blob/main/lib/mocker/src/replay/offline/README.md)
 - [Mocker Engine Architecture](../../modular-components/backends/mocker/mocker-engine-architecture.md)
 - [DynoSim Replay CLI Reference](../../../../reference/components/dynosim-replay-cli-reference.mdx)
 - [DynoSim Sweep Reference](../../../../reference/components/dynosim-sweep-reference.mdx)

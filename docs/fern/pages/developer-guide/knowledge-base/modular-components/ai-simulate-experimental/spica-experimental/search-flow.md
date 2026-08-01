@@ -23,7 +23,7 @@ sweep run control.
 | Replay runner | execution of a complete `ReplaySpec`, supported backend/topology pairs, supported runtime hooks | optimizer suggestions or adapter search-space generation |
 
 The AI Simulate distribution has no `ai-dynamo` dependency. The Dynamo wheel owns its Planner and
-Router adapters and the transitional Dynamo replay runner.
+Router adapters and the runner composition that injects them into the shared Replayer.
 
 ## Sweep Flow
 
@@ -94,15 +94,16 @@ domains, scoring, and replay results retain their existing behavior while `Repla
 execution boundary. Adapter namespacing and parameter registration order can change Vizier's exact
 finite-round suggestion sequence, so parity does not require an identical optimizer trajectory.
 
-## Replay Refactor Coordination
+## Replay Composition
 
-Replay is being decoupled in parallel. Until that work lands, `DynamoReplayRunnerFactory` wraps the
-current Dynamo Replay API:
+`DynamoReplayRunnerFactory` converts each serializable `ReplaySpec` into a shared Replayer
+invocation:
 
 - backend-only Spica targets the Dynamo-free replay runner;
 - Spica with Dynamo hooks targets the Dynamo replay composition.
 
-This split keeps one Spica core and avoids a second Dynamo-specific sweep implementation.
+This split keeps one Spica core and one replay implementation while Dynamo owns only its policy
+adapters.
 
 ## Related Documentation
 

@@ -27,9 +27,9 @@ source .venv/bin/activate
 uv pip install -e ./aisimulate
 ```
 
-For Dynamo features, install the matching `ai-dynamo[simulation]` extra. It installs the Planner
+For Dynamo features, install the matching `ai-dynamo[simulate]` extra. It installs the Planner
 simulation dependencies and publishes the `dynamo.planner` and `dynamo.router` adapter entry
-points plus a transitional replay runner over the current Dynamo Replay API.
+points plus a Dynamo runner that composes those adapters with the shared AI Simulate Replayer.
 
 Run a sweep from Python with an explicit runner:
 
@@ -47,7 +47,7 @@ candidates = run_smart_search(
 The standalone module validates the backend-neutral core schema but intentionally has no implicit
 replay runtime. Adapter-owned search spaces are validated when the selected adapters are resolved
 by `run_smart_search`.
-KVBM sweep fields have been removed; native G2 is their replacement.
+KVBM sweep fields have been removed and have no adapter migration.
 
 Read the [Spica documentation](../docs/fern/pages/developer-guide/knowledge-base/modular-components/ai-simulate-experimental/spica-experimental/overview.md)
 for its configuration, search-space, and replay behavior. Runnable configurations and tools live

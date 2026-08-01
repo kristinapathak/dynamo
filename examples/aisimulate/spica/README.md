@@ -32,7 +32,7 @@ uv pip install -e ./aisimulate
 uv pip install -r container/deps/requirements.planner.txt
 ```
 
-For published wheels, `uv pip install "ai-dynamo[simulation]"` installs the matching simulation
+For published wheels, `uv pip install "ai-dynamo[simulate]"` installs the matching simulation
 bundle. The `dynamo-planner` image already builds and installs both wheels from the same commit.
 
 ## Run a Search

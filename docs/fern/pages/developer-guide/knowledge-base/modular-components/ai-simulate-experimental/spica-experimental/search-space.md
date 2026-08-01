@@ -51,8 +51,8 @@ of the key.
 | `aic_nextn` | `int?` | `None` | optional speculative-decoding depth |
 
 Backends that have no performance database, no legal parallel configuration, or no support from
-the selected runner are removed before sampling. The transitional Dynamo runner supports vLLM and
-SGLang aggregated and disaggregated replay, and TensorRT-LLM aggregated replay.
+the selected runner are removed before sampling. The Dynamo runner supports vLLM and SGLang
+aggregated and disaggregated replay, and TensorRT-LLM aggregated replay.
 
 ## Engine Fields
 
@@ -163,7 +163,8 @@ an enabled candidate produces a `dynamo.planner:scaling_policy@1` hook containin
 ## Removed KVBM Fields
 
 Spica rejects old KVBM fields such as `num_g2_blocks`, transfer bandwidth, offload batch size, and
-host/disk cache-hit weights. Native G2 replaces KVBM, so these fields have no adapter migration.
+host/disk cache-hit weights. These fields are not supported by the AI Simulate engine and replay
+path and have no adapter migration.
 
 Old flat Planner and Router fields are also rejected. Move them under
 `adapters.dynamo.planner.search_space` or `adapters.dynamo.router.search_space` and use the adapter
