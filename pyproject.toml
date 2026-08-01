@@ -84,8 +84,20 @@ mocker = [
     "aiconfigurator-core==0.11.0.dev20260728",
 ]
 
-simulation = [
+simulate = [
     # Placeholder until the standalone aisimulate wheel is published to the release package index.
+    "aisimulate==0.1.0",
+    "filterpy==1.4.5",
+    "pmdarima==2.1.1",
+    "prometheus-api-client==0.6.0",
+    "prophet==1.2.1",
+    "scikit-learn==1.7.2",
+    "scipy>=1.14.0,<2.0",
+]
+
+# Backward-compatible alias for the original extra name. Keep this list exactly
+# aligned with `simulate` until downstream users have migrated.
+simulation = [
     "aisimulate==0.1.0",
     "filterpy==1.4.5",
     "pmdarima==2.1.1",

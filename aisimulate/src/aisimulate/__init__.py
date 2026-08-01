@@ -5,3 +5,31 @@
 
 APIs under this namespace may change without a standard deprecation period.
 """
+
+from .runner import (
+    InvalidRunnerError,
+    NativeReplayRunner,
+    NativeReplayRunnerFactory,
+    RunnerUnavailableError,
+)
+from .spica.replay import (
+    BackendDeploymentSpec,
+    ReplayReport,
+    ReplaySpec,
+    Runner,
+    RunnerCapabilities,
+    RunnerFactory,
+)
+
+__all__ = [
+    "BackendDeploymentSpec",
+    "InvalidRunnerError",
+    "NativeReplayRunner",
+    "NativeReplayRunnerFactory",
+    "ReplayReport",
+    "ReplaySpec",
+    "Runner",
+    "RunnerCapabilities",
+    "RunnerFactory",
+    "RunnerUnavailableError",
+]

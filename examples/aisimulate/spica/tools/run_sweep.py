@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run Spica with the transitional Dynamo replay composition."""
+"""Run Spica with the Dynamo replay composition."""
 
 from __future__ import annotations
 

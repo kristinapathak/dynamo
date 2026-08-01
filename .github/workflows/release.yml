@@ -767,8 +767,8 @@ jobs:
             | tar -x -C "${STAGE}/amd64" \
                 --wildcards \
                 'opt/dynamo/wheelhouse/ai_dynamo-*py3-none-any.whl' \
-                'opt/dynamo/wheelhouse/aisimulate-*py3-none-any.whl' \
                 'opt/dynamo/wheelhouse/ai_dynamo_runtime-*x86_64*.whl' \
+                'opt/dynamo/wheelhouse/aisimulate-*x86_64*.whl' \
                 'opt/dynamo/wheelhouse/kvbm-*x86_64*.whl'
 
           echo "Exporting arm64 filesystem from ${ECR_IMAGE}..."
@@ -776,6 +776,7 @@ jobs:
             | tar -x -C "${STAGE}/arm64" \
                 --wildcards \
                 'opt/dynamo/wheelhouse/ai_dynamo_runtime-*aarch64*.whl' \
+                'opt/dynamo/wheelhouse/aisimulate-*aarch64*.whl' \
                 'opt/dynamo/wheelhouse/kvbm-*aarch64*.whl'
 
           OUT="${STAGE}/upload"
@@ -813,23 +814,24 @@ jobs:
           # Catches UTC-midnight drift between the build-time version stamp and
           # prepare-release's wheel_version; ai_dynamo and ai_dynamo_runtime must agree.
           # aisimulate follows its own package version, but must be staged alongside
-          # the ai-dynamo[simulation] wheel that depends on it.
+          # the ai-dynamo[simulate] wheel that depends on it.
           shopt -s nullglob
           AI_DYNAMO_WHEELS=("${UPLOAD_DIR}"/ai_dynamo-*-py3-none-any.whl)
           AI_DYNAMO_RUNTIME_WHEELS=("${UPLOAD_DIR}"/ai_dynamo_runtime-*.whl)
-          AISIMULATE_WHEELS=("${UPLOAD_DIR}"/aisimulate-*-py3-none-any.whl)
+          AISIMULATE_AMD64_WHEELS=("${UPLOAD_DIR}"/aisimulate-*x86_64*.whl)
+          AISIMULATE_ARM64_WHEELS=("${UPLOAD_DIR}"/aisimulate-*aarch64*.whl)
           shopt -u nullglob
 
           if [ ${#AI_DYNAMO_WHEELS[@]} -eq 0 ] || [ ${#AI_DYNAMO_RUNTIME_WHEELS[@]} -eq 0 ]; then
             echo "::error::Missing ai_dynamo or ai_dynamo_runtime wheel in ${UPLOAD_DIR}"
             exit 1
           fi
-          if [ ${#AISIMULATE_WHEELS[@]} -ne 1 ]; then
-            echo "::error::Expected exactly one aisimulate wheel in ${UPLOAD_DIR}, found ${#AISIMULATE_WHEELS[@]}"
+          if [ ${#AISIMULATE_AMD64_WHEELS[@]} -ne 1 ] || [ ${#AISIMULATE_ARM64_WHEELS[@]} -ne 1 ]; then
+            echo "::error::Expected exactly one aisimulate wheel per architecture in ${UPLOAD_DIR}"
             exit 1
           fi
 
-          python3 - "${AISIMULATE_WHEELS[0]}" "${AI_DYNAMO_WHEELS[@]}" <<'PY'
+          python3 - "${AISIMULATE_AMD64_WHEELS[0]}" "${AISIMULATE_ARM64_WHEELS[0]}" "${AI_DYNAMO_WHEELS[@]}" <<'PY'
           import re
           import sys
           from email.parser import BytesParser
@@ -852,14 +854,17 @@ jobs:
                   return BytesParser().parsebytes(wheel.read(metadata_files[0]))
 
 
-          aisimulate_path = Path(sys.argv[1])
-          aisimulate_version = wheel_metadata(aisimulate_path)["Version"]
-          if not aisimulate_version:
+          aisimulate_paths = [Path(sys.argv[1]), Path(sys.argv[2])]
+          aisimulate_versions = {
+              wheel_metadata(path)["Version"] for path in aisimulate_paths
+          }
+          if None in aisimulate_versions or len(aisimulate_versions) != 1:
               raise SystemExit(
-                  f"::error::{aisimulate_path.name} has no Version in wheel metadata"
+                  "::error::aisimulate platform wheels have missing or mismatched versions"
               )
+          aisimulate_version = aisimulate_versions.pop()
 
-          for raw_path in sys.argv[2:]:
+          for raw_path in sys.argv[3:]:
               ai_dynamo_path = Path(raw_path)
               metadata = wheel_metadata(ai_dynamo_path)
               pins = []
@@ -871,19 +876,21 @@ jobs:
                   )
                   if match:
                       pins.append(match.group(1))
-              if len(pins) != 1:
+              distinct_pins = set(pins)
+              if not pins or len(distinct_pins) != 1:
                   raise SystemExit(
                       f"::error::{ai_dynamo_path.name} contains {len(pins)} exact "
-                      "aisimulate pins in Requires-Dist; expected exactly one"
+                      "aisimulate requirements with missing or mismatched versions"
                   )
-              if pins[0] != aisimulate_version:
+              aisimulate_pin = distinct_pins.pop()
+              if aisimulate_pin != aisimulate_version:
                   raise SystemExit(
                       f"::error::aisimulate wheel version {aisimulate_version!r} "
                       f"does not match {ai_dynamo_path.name} Requires-Dist pin "
-                      f"{pins[0]!r}"
+                      f"{aisimulate_pin!r}"
                   )
               print(
-                  f"  {aisimulate_path.name} -> {aisimulate_version} "
+                  f"  aisimulate platform wheels -> {aisimulate_version} "
                   f"(matches {ai_dynamo_path.name})"
               )
           PY

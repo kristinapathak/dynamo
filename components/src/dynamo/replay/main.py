@@ -29,7 +29,6 @@ from dynamo.common.forward_pass_metrics import (
 )
 from dynamo.llm import AicPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
-from dynamo.mocker.utils.kv_cache import compute_kv_bytes_per_token
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
 from dynamo.replay.reporting import format_report_table, write_report_json
 
@@ -184,30 +183,6 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     raw["num_gpu_blocks"] = per_rank_blocks
 
 
-def _resolve_kv_bytes_per_token(raw: dict) -> None:
-    if raw.get("kv_bytes_per_token") is not None:
-        return
-
-    offload_requested = (
-        any(
-            isinstance(raw.get(name), int) and raw[name] > 0
-            for name in ("num_g2_blocks", "num_g3_blocks")
-        )
-        or raw.get("enable_g4_storage") is True
-    )
-    if not offload_requested:
-        return
-
-    model_path = raw.get("aic_model_path")
-    if not model_path:
-        return
-
-    kv_cache_dtype = _aic_quant_mode(raw, "aic_kv_cache_dtype") or "auto"
-    kv_bytes_per_token = compute_kv_bytes_per_token(model_path, kv_cache_dtype)
-    if kv_bytes_per_token is not None:
-        raw["kv_bytes_per_token"] = kv_bytes_per_token
-
-
 def _load_engine_args(raw_args: str | None):
     if raw_args is None:
         return None
@@ -241,7 +216,6 @@ def _load_engine_args(raw_args: str | None):
             else:
                 del raw["planner_profile_data"]
     _resolve_aic_num_gpu_blocks(raw)
-    _resolve_kv_bytes_per_token(raw)
     return MockEngineArgs.from_json(json.dumps(raw))
 
 

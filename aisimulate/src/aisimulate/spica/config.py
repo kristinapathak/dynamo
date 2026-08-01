@@ -561,8 +561,8 @@ class SmartSearchConfig(BaseModel):
         present_kvbm = sorted(kvbm_fields.intersection(search_space))
         if present_kvbm:
             raise ValueError(
-                "KVBM sweep fields were removed from Spica and have no migration "
-                f"because native G2 replaces KVBM; remove {present_kvbm}"
+                "KVBM sweep fields are not supported by the AISimulate engine "
+                f"and replay path; remove {present_kvbm}"
             )
         present_planner = sorted(planner_fields.intersection(search_space))
         if present_planner:
