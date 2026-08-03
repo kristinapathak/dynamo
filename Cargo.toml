@@ -33,6 +33,7 @@ members = [
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",
 ]
+exclude = ["examples/router/custom-worker-selection-policy"]
 resolver = "3"
 
 [workspace.package]

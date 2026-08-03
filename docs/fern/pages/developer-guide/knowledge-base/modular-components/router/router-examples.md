@@ -169,6 +169,8 @@ extraPodSpec:
 
 The `KvRouter` supports multiple usage patterns depending on your control requirements:
 
+For a native Rust policy linked into a custom router image, see the [SGLang-style worker selection example](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-worker-selection-policy).
+
 ### 1. Automatic Routing (Recommended)
 Call `generate()` directly and let the router handle everything:
 ```python

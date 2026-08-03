@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-sglang-cache-load-policy"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[dependencies]
+anyhow = "1"
+dynamo-kv-router = { path = "../../../lib/kv-router" }
+dynamo-llm = { path = "../../../lib/llm" }
+dynamo-runtime = { path = "../../../lib/runtime" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "worker_selection"
+harness = false

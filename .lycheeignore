@@ -47,3 +47,7 @@
 # it 404 from CI until the PR merges. Remove this entry once agg.yaml lands on main
 # (afterwards lychee validates the URL again, catching any later rename/move).
 ^https://github\.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg\.yaml
+
+# The custom worker-selection example is added in this PR, so its canonical
+# tree/main link 404s until the PR merges. Remove this entry after it lands.
+^https://github\.com/ai-dynamo/dynamo/tree/main/examples/router/custom-worker-selection-policy$
